@@ -1,0 +1,15 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug DreamVLA Train (torchrun multi-GPU)",
+            "type": "debugpy",
+            "request": "launch",
+            "cwd": "/data3/hj/rlds_dataset_builder",
+            "console": "integratedTerminal",
+            "program": "test.py",
+            "python": "/data/Users/hj/miniconda3/envs/openvla-oft/bin/python",
+            "justMyCode": false,
+        }
+    ]
+}
