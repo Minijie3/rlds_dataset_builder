@@ -21,7 +21,6 @@ def load_hdf5(dataset_dir, dataset_name):
         exit()
 
     with h5py.File(dataset_path, 'r') as root:
-        is_sim = root.attrs['sim']
         compressed = root.attrs.get('compress', False)
         qpos = root['/observations/qpos'][()]
         qvel = root['/observations/qvel'][()]
@@ -30,7 +29,6 @@ def load_hdf5(dataset_dir, dataset_name):
         else:
             effort = None
         action = root['/action'][()]
-        base_action = root['/base_action'][()]
         image_dict = dict()
         for cam_name in root[f'/observations/images/'].keys():
             image_dict[cam_name] = root[f'/observations/images/{cam_name}'][()]
@@ -49,7 +47,7 @@ def load_hdf5(dataset_dir, dataset_name):
                 image_list.append(image)
             image_dict[cam_name] = image_list
 
-    return qpos, qvel, effort, action, base_action, image_dict
+    return qpos, qvel, effort, action, image_dict
 
 def main(args):
     dataset_dir = args['dataset_dir']
@@ -57,16 +55,15 @@ def main(args):
     task_name   = args['task_name']
     dataset_name = f'episode_{episode_idx}'
 
-    qpos, qvel, effort, action, base_action, image_dict = load_hdf5(os.path.join(dataset_dir, task_name), dataset_name)
+    qpos, qvel, effort, action, image_dict = load_hdf5(os.path.join(dataset_dir, task_name), dataset_name)
     
     print('hdf5 loaded!!')
+
+    os.makedirs('/data3/hj/rlds_dataset_builder/visual_dataset/' + task_name, exist_ok=True)
     
-    save_videos(image_dict, action, DT,  video_path=os.path.join('/data/Users/hj/aloha_dataset_build/visual_dataset/' + task_name, dataset_name + '_video.mp4'))
-   
+    save_videos(image_dict, action, DT,  video_path=os.path.join('/data3/hj/rlds_dataset_builder/visual_dataset/' + task_name, dataset_name + '_video.mp4'))
 
-
-    visualize_joints(qpos, action, plot_path=os.path.join('/data/Users/hj/aloha_dataset_build/visual_dataset/' + task_name, dataset_name + '_qpos.png'))
-    visualize_base(base_action, plot_path=os.path.join('/data/Users/hj/aloha_dataset_build/visual_dataset/' + task_name, dataset_name + '_base_action.png'))
+    # visualize_joints(qpos, action, plot_path=os.path.join('/data/Users/hj/aloha_dataset_build/visual_dataset/' + task_name, dataset_name + '_qpos.png'))
 
 def save_videos(video, actions, dt, video_path=None):
     cam_names = list(video.keys())

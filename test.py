@@ -5,7 +5,7 @@ from PIL import Image
 import matplotlib.pyplot as plt
 
 # Import feature extraction functions
-from LIBERO_Goal.LIBERO_Goal_dataset_builder import extract_tracks_for_episode, extract_sam_features, extract_depth_features
+from LIBERO_Goal.LIBERO_Goal_dataset_builder import extract_tracks_for_episode, extract_sam_features, extract_depth_features, extract_laq_features
 
 def test_feature_extraction(image_path):
     """Test feature extraction for a single image"""
@@ -37,13 +37,38 @@ def test_feature_extraction(image_path):
     depth_features = extract_depth_features([image])  # Single image
     print(f"Depth feature shape: {depth_features.shape}")
     
+    # Test LAQ features for different modalities
+    print("\nExtracting LAQ features...")
+    
+    # LAQ for image features
+    print("Extracting LAQ image features...")
+    laq_image_features = extract_laq_features(images, feature_type='image')
+    print(f"LAQ image features shape: {laq_image_features.shape}")
+    
+    # LAQ for depth features
+    print("Extracting LAQ depth features...")
+    # Note: We need to create depth features for all frames first
+    depth_features_all = extract_depth_features(images)
+    laq_depth_features = extract_laq_features(depth_features_all, feature_type='depth')
+    print(f"LAQ depth features shape: {laq_depth_features.shape}")
+    
+    # LAQ for SAM features
+    print("Extracting LAQ SAM features...")
+    # Note: We need to create SAM features for all frames first
+    sam_features_all, _ = extract_sam_features(images)
+    laq_sam_features = extract_laq_features(sam_features_all, feature_type='sam')
+    print(f"LAQ SAM features shape: {laq_sam_features.shape}")
+    
     return {
         'image': image,
         'tracks': tracks,
         'visibility': visibility,
         'sam_features': sam_features,
         'masks': masks_list,
-        'depth_features': depth_features
+        'depth_features': depth_features,
+        'laq_image_features': laq_image_features,
+        'laq_depth_features': laq_depth_features,
+        'laq_sam_features': laq_sam_features
     }
 
 def visualize_features(results, save_path=None):
@@ -55,6 +80,11 @@ def visualize_features(results, save_path=None):
     sam_features = results['sam_features']
     masks = results['masks']
     depth_features = results['depth_features']
+    
+    # LAQ features for printing shapes
+    laq_image_features = results['laq_image_features']
+    laq_depth_features = results['laq_depth_features']
+    laq_sam_features = results['laq_sam_features']
     
     fig, axes = plt.subplots(2, 3, figsize=(15, 10))
     
@@ -129,12 +159,18 @@ def visualize_features(results, save_path=None):
     - SAM features shape: {sam_features.shape}
     - Masks: {masks_shape_info}
     - Depth features shape: {depth_features.shape}
+    - LAQ image features shape: {laq_image_features.shape}
+    - LAQ depth features shape: {laq_depth_features.shape}
+    - LAQ SAM features shape: {laq_sam_features.shape}
     
     Value Ranges:
     - Tracks: [{tracks.min():.3f}, {tracks.max():.3f}]
     - Visibility: [{visibility.min():.3f}, {visibility.max():.3f}]
     - SAM: [{sam_features.min():.3f}, {sam_features.max():.3f}]
     - Depth: [{depth_features.min():.3f}, {depth_features.max():.3f}]
+    - LAQ Image: [{laq_image_features.min():.3f}, {laq_image_features.max():.3f}]
+    - LAQ Depth: [{laq_depth_features.min():.3f}, {laq_depth_features.max():.3f}]
+    - LAQ SAM: [{laq_sam_features.min():.3f}, {laq_sam_features.max():.3f}]
     """
     
     plt.figtext(0.1, 0.02, stats_text, fontsize=10, fontfamily='monospace')
@@ -158,7 +194,17 @@ def test_single_image(image_path, output_path="feature_visualization.png"):
         print("\nFeature extraction completed!")
         print("=" * 50)
         
-        # Visualize the results
+        # Print detailed LAQ feature information
+        print("\nLAQ Feature Details:")
+        print("-" * 30)
+        print(f"LAQ Image Features: shape={results['laq_image_features'].shape}, "
+              f"range=[{results['laq_image_features'].min():.3f}, {results['laq_image_features'].max():.3f}]")
+        print(f"LAQ Depth Features: shape={results['laq_depth_features'].shape}, "
+              f"range=[{results['laq_depth_features'].min():.3f}, {results['laq_depth_features'].max():.3f}]")
+        print(f"LAQ SAM Features: shape={results['laq_sam_features'].shape}, "
+              f"range=[{results['laq_sam_features'].min():.3f}, {results['laq_sam_features'].max():.3f}]")
+        
+        # Visualize the results (excluding LAQ features from visualization as requested)
         visualize_features(results, output_path)
         
         return results
@@ -171,7 +217,7 @@ def test_single_image(image_path, output_path="feature_visualization.png"):
 
 if __name__ == "__main__":
     # Test image path - Replace with your image path
-    test_image_path = "random_image_tf.jpg"  # Or use another image path
+    test_image_path = "random_image.png"  # Or use another image path
     
     import os
     # If there is no test image, create a simple test image
@@ -189,4 +235,3 @@ if __name__ == "__main__":
         print("\nTest completed successfully!")
     else:
         print("\nTest failed!")
-

@@ -8,7 +8,7 @@
             "cwd": "/data3/hj/rlds_dataset_builder",
             "console": "integratedTerminal",
             "program": "test.py",
-            "python": "/data/Users/hj/miniconda3/envs/openvla-oft/bin/python",
+            "python": "/data7/Users/hj/miniconda3/envs/rlds_env/bin/python",
             "justMyCode": false,
         }
     ]

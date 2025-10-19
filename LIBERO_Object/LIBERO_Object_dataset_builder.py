@@ -16,9 +16,13 @@ from PIL import Image
 sys.path.insert(0, "/data3/hj/rlds_dataset_builder")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from segment_anything.segment_anything import SamAutomaticMaskGenerator, sam_model_registry
-from segment_anything.segment_anything.utils.transforms import ResizeLongestSide
-from co_tracker.cotracker.predictor import CoTrackerPredictor
+# Import utility functions
+from utils import (
+    extract_tracks_for_episode, 
+    extract_sam_features, 
+    extract_depth_features,
+    extract_laq_features
+)
 
 os.environ["TFDS_OFFLINE"] = "1"
 os.environ["TFHUB_DISABLE_HTTP"] = "1"
@@ -27,188 +31,6 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 requests.get = Mock(side_effect=lambda *args, **kwargs: None)
 requests.post = Mock(side_effect=lambda *args, **kwargs: None)
 requests.head = Mock(side_effect=lambda *args, **kwargs: None)
-
-_track_model = None
-_sam_model = None
-_depth_model = None
-
-def get_points_on_a_grid(patch_size, image_size, device):
-    if isinstance(patch_size, int):
-        patch_size = (patch_size, patch_size)
-    H, W = image_size
-    ph, pw = patch_size
-
-    assert H % ph == 0 and W % pw == 0, "The patch size must divide the image dimensions"
-
-    y_centers = np.arange(ph // 2, H, ph)
-    x_centers = np.arange(pw // 2, W, pw)
-
-    xv, yv = np.meshgrid(x_centers, y_centers)
-    centers = np.stack([xv, yv], axis=-1).reshape(-1, 2)
-    return torch.from_numpy(centers).to(device)
-
-def extract_tracks_for_episode(images, frame_gap=8, patch_size=8):
-    global _track_model
-    
-    if _track_model is None:
-        checkpoint = "/data3/hj/rlds_dataset_builder/co_tracker/checkpoints/scaled_offline.pth"
-        _track_model = CoTrackerPredictor(
-            checkpoint=checkpoint,
-            v2=False,
-            offline=True,
-            window_len=60
-        )
-        _track_model = _track_model.to('cuda').eval()
-    
-    video_frames = []
-    for img in images:
-        img_pil = Image.fromarray(img).resize((224, 224), resample=Image.BICUBIC)
-        
-        img_array = np.array(img_pil)[::-1, ::-1].copy()
-        video_frames.append(img_array)
-    
-    video = np.stack(video_frames)
-    video_tensor = torch.from_numpy(video).permute(0, 3, 1, 2).float()
-    
-    if video_tensor.shape[0] < frame_gap + 1:
-        video_segments = torch.zeros((0, 2, *video.shape[1:]))
-    else:
-        video_segments = video_tensor.unfold(0, frame_gap + 1, 1)
-        video_segments = video_segments[..., [0, -1]]
-        video_segments = video_segments.permute(0, 4, 1, 2, 3).contiguous()
-    
-    grid_pts = get_points_on_a_grid(patch_size, [224, 224], device='cpu').float().unsqueeze(0)
-    grid_size = 224 // patch_size
-    
-    queries = torch.cat(
-        [torch.ones_like(grid_pts[:, :, :1]) * 0, grid_pts],
-        dim=2,
-    ).repeat(video_segments.shape[0], 1, 1)
-    
-    video_segments = video_segments.to('cuda')
-    queries = queries.to('cuda')
-    
-    batch_size = 32
-    total_size = video_segments.shape[0]
-    pred_tracks_list = []
-    pred_visibility_list = []
-    
-    for start in range(0, total_size, batch_size):
-        end = min(start + batch_size, total_size)
-        pred_tracks_batch, pred_visibility_batch = _track_model(
-            video_segments[start:end],
-            queries=queries[start:end],
-            grid_size=grid_size,
-            backward_tracking=False,
-        )
-        pred_tracks_list.append(pred_tracks_batch)
-        pred_visibility_list.append(pred_visibility_batch)
-    
-    pred_tracks = torch.cat(pred_tracks_list, dim=0)
-    pred_visibility = torch.cat(pred_visibility_list, dim=0)
-    
-    pred_tracks_delta = (pred_tracks[:, 1:2, :, :] - pred_tracks[:, 0:1, :, :]).squeeze(1)
-    
-    tracks = pred_tracks_delta.cpu().numpy()  # [N, 784, 2]
-    visibility = pred_visibility[:, 1, :].cpu().numpy()  # [N, 784]
-    
-    tracks_full = np.concatenate([tracks, np.zeros([frame_gap, 784, 2], dtype=np.float32)], axis=0)
-    visibility_full = np.concatenate([visibility, np.zeros([frame_gap, 784], dtype=np.float32)], axis=0)
-    
-    return tracks_full, visibility_full
-
-def extract_sam_features(images):
-    global _sam_model, _mask_generator
-    masks = None
-    
-    if _sam_model is None:
-        checkpoint = "/data3/hj/rlds_dataset_builder/segment_anything/ckpts/sam_vit_b_01ec64.pth"
-        model_type = '_'.join(os.path.basename(checkpoint).split('_')[1:3])
-        _sam_model = sam_model_registry[model_type](checkpoint=checkpoint)
-        _sam_model = _sam_model.to('cuda').eval()
-
-        # === Only for debug ===
-        # _mask_generator = SamAutomaticMaskGenerator(_sam_model)
-    
-    transform = ResizeLongestSide(_sam_model.image_encoder.img_size)
-    processed_images = []
-    
-    for img in images:
-        img_processed = np.array(img[::-1, ::-1]).copy()
-        img_processed = transform.apply_image(img_processed)
-        img_tensor = torch.as_tensor(img_processed).permute(2, 0, 1).contiguous()
-        processed_images.append(img_tensor)
-    
-    batch_tensor = torch.stack(processed_images).cpu()
-    
-    batch_size = 4
-    total_size = batch_tensor.shape[0]
-    features_list = []
-    
-    for start in range(0, total_size, batch_size):
-        end = min(start + batch_size, total_size)
-        batch_input = batch_tensor[start:end].float().to('cuda')
-        
-        with torch.no_grad():
-            features_batch = _sam_model.image_encoder(batch_input) # [B, C, H, W]
-            features_batch = torch.nn.functional.avg_pool2d(features_batch, kernel_size=4, stride=4, padding=0)
-            features_batch = features_batch.flatten(start_dim=-2)
-            features_list.append(features_batch)
-    
-    features = torch.cat(features_list, dim=0)
-
-    # === Only for debug ===
-    # masks = _mask_generator.generate(images[0][::-1, ::-1])
-    
-    return features.to(torch.float32).cpu().numpy(), masks
-
-def extract_depth_features(images):
-    global _depth_model
-    
-    if _depth_model is None:
-        from Depth_Anything_V2.metric_depth.depth_anything_v2.dpt import DepthAnythingV2
-        
-        model_configs = {
-            'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
-            'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
-            'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
-            'vitg': {'encoder': 'vitg', 'features': 384, 'out_channels': [1536, 1536, 1536, 1536]}
-        }
-        encoder = 'vitb'
-        
-        _depth_model = DepthAnythingV2(**model_configs[encoder])
-        depth_ckpt = torch.load(f'/data3/zyj/DreamVLA/checkpoints/depth_anything_v2_{encoder}.pth', map_location='cpu')
-        _depth_model.load_state_dict(depth_ckpt)
-        _depth_model = _depth_model.to("cuda").eval()
-    
-    transform = ResizeLongestSide(_depth_model.pretrained.patch_embed.img_size[0])
-    processed_images = []
-    
-    for img in images:
-        img_processed = np.array(img[::-1, ::-1]).copy()
-        img_processed = transform.apply_image(img_processed)
-        img_tensor = torch.as_tensor(img_processed).permute(2, 0, 1).contiguous()
-        processed_images.append(img_tensor)
-    
-    batch_tensor = torch.stack(processed_images).to('cuda')
-    
-    batch_size = 32
-    total_size = batch_tensor.shape[0]
-    features_list = []
-    
-    for start in range(0, total_size, batch_size):
-        end = min(start + batch_size, total_size)
-        batch_input = batch_tensor[start:end].permute(0, 2, 3, 1)  # [B, H, W, C]
-        
-        with torch.no_grad():
-            for i in range(batch_input.shape[0]):
-                img_np = batch_input[i].cpu().numpy()
-                feature = _depth_model.infer_image(img_np, _depth_model.pretrained.patch_embed.img_size[0])
-                features_list.append(torch.tensor(feature))
-    
-    features = torch.stack(features_list, dim=0)
-    
-    return features.to(torch.float32).cpu().numpy()  # [T, ...]
 
 class LIBEROObject(tfds.core.GeneratorBasedBuilder):
     """DatasetBuilder for example dataset."""
@@ -280,14 +102,44 @@ class LIBEROObject(tfds.core.GeneratorBasedBuilder):
                             doc='SAM features for wrist camera image.',
                         ),
                         'depth_features_image': tfds.features.Tensor(
-                            shape=(518, 518),  
+                            shape=(224, 224),  
                             dtype=np.float32,
                             doc='Depth features for main camera image.',
                         ),
                         'depth_features_wrist': tfds.features.Tensor(
-                            shape=(518, 518),
+                            shape=(224, 224), 
                             dtype=np.float32,
                             doc='Depth features for wrist camera image.',
+                        ),
+                        'laq_image_features': tfds.features.Tensor(
+                            shape=(4, 1024),
+                            dtype=np.float32,
+                            doc='LAQ latent tokens for main camera image.',
+                        ),
+                        'laq_wrist_features': tfds.features.Tensor(
+                            shape=(4, 1024),
+                            dtype=np.float32,
+                            doc='LAQ latent tokens for wrist camera image.',
+                        ),
+                        'laq_depth_features_image': tfds.features.Tensor(
+                            shape=(4, 1024),
+                            dtype=np.float32,
+                            doc='LAQ latent tokens for main camera depth.',
+                        ),
+                        'laq_depth_features_wrist': tfds.features.Tensor(
+                            shape=(4, 1024),
+                            dtype=np.float32,
+                            doc='LAQ latent tokens for wrist camera depth.',
+                        ),
+                        'laq_sam_features_image': tfds.features.Tensor(
+                            shape=(4, 1024),
+                            dtype=np.float32,
+                            doc='LAQ latent tokens for main camera SAM.',
+                        ),
+                        'laq_sam_features_wrist': tfds.features.Tensor(
+                            shape=(4, 1024),
+                            dtype=np.float32,
+                            doc='LAQ latent tokens for wrist camera SAM.',
                         ),
                     }),
                     'action': tfds.features.Tensor(
@@ -339,8 +191,6 @@ class LIBEROObject(tfds.core.GeneratorBasedBuilder):
 
     def _generate_examples(self, paths) -> Iterator[Tuple[str, Any]]:
         """Yields episodes for list of data paths."""
-        # the line below needs to be *inside* generate_examples so that each worker creates it's own model
-        # creating one shared model outside this function would cause a deadlock
 
         def _parse_example(episode_path, demo_id):
             # load raw data
@@ -367,6 +217,13 @@ class LIBEROObject(tfds.core.GeneratorBasedBuilder):
             
             depth_features_image = extract_depth_features(images)
             depth_features_wrist = extract_depth_features(wrist_images)
+            
+            laq_image_features = extract_laq_features(images, feature_type='image')
+            laq_wrist_features = extract_laq_features(wrist_images, feature_type='image')
+            laq_depth_features_image = extract_laq_features(depth_features_image, feature_type='depth')
+            laq_depth_features_wrist = extract_laq_features(depth_features_wrist, feature_type='depth')
+            laq_sam_features_image = extract_laq_features(sam_features_image, feature_type='sam')
+            laq_sam_features_wrist = extract_laq_features(sam_features_wrist, feature_type='sam')
 
             # compute language instruction
             raw_file_string = os.path.basename(episode_path).split('/')[-1]
@@ -396,6 +253,12 @@ class LIBEROObject(tfds.core.GeneratorBasedBuilder):
                         'sam_features_wrist': sam_features_wrist[i].astype(np.float32),
                         'depth_features_image': depth_features_image[i].astype(np.float32),
                         'depth_features_wrist': depth_features_wrist[i].astype(np.float32),
+                        'laq_image_features': laq_image_features[i].astype(np.float32),
+                        'laq_wrist_features': laq_wrist_features[i].astype(np.float32),
+                        'laq_depth_features_image': laq_depth_features_image[i].astype(np.float32),
+                        'laq_depth_features_wrist': laq_depth_features_wrist[i].astype(np.float32),
+                        'laq_sam_features_image': laq_sam_features_image[i].astype(np.float32),
+                        'laq_sam_features_wrist': laq_sam_features_wrist[i].astype(np.float32),
                     },
                     'action': np.asarray(actions[i], dtype=np.float32),
                     'discount': 1.0,
@@ -414,7 +277,6 @@ class LIBEROObject(tfds.core.GeneratorBasedBuilder):
                 }
             }
 
-            # if you want to skip an example for whatever reason, simply return None
             return episode_path + f"_{demo_id}", sample
 
         # for smallish datasets, use single-thread parsing
